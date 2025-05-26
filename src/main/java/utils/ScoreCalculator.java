@@ -1,90 +1,97 @@
 package utils;
 
-
+import com.fasterxml.jackson.databind.ObjectMapper;
 import model.AlgorithmInfo;
 import model.MetaData;
+import model.AlgorithmScoreResult;
+import model.ScoreResultContainer;
+import utils.MetaDataFilter;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.io.File;
+import java.io.IOException;
+import java.util.*;
 import java.util.stream.Collectors;
 
 public class ScoreCalculator {
 
-    public static void calculate(AlgorithmInfo algorithmInfo){
-        //获取符合条件的metaData
+    public static AlgorithmScoreResult calculate(AlgorithmInfo algorithmInfo){
         List<MetaData> metaDataList = MetaDataFilter.filterMetadata();
 
-        // 问题的分数
-        List<Double> problemScoreList = new ArrayList<Double>();
+        Map<String, Map<String, Double>> scorePerInstanceMap = new HashMap<>();
+        Map<String, Double> scorePerProblemMap = new HashMap<>();
+        List<Double> problemScoreList = new ArrayList<>();
 
-        // 每一个问题
-        metaDataList.forEach(metaData -> {
+        for (MetaData metaData : metaDataList) {
             String problemDomain = metaData.getProblemDomain();
+            List<MetaData.InstanceInfo> instanceInfos = metaData.getInstanceInfoList();
+            List<Double> instanceScores = new ArrayList<>();
 
-            // 具体问题的实例分数
-            List<Double> instanceScoreList = new ArrayList<Double>();
+            Map<String, Double> instanceScoreMap = new HashMap<>();
 
+            // 获取算法中的对应问题域值
+            List<Double> objectValues = algorithmInfo.getProblemDomainInfoList().stream()
+                    .filter(p -> p.getProblemDomain().equals(problemDomain))
+                    .flatMap(p -> p.getObjectValueList().stream())
+                    .collect(Collectors.toList());
 
-                for (int i = 0; i < metaData.getInstanceInfoList().size(); i++) {
-                    MetaData.InstanceInfo instanceInfo = metaData.getInstanceInfoList().get(i);
-                    //筛选出相同的problemDomain的objectValue
-                    List<Double> objectValueList = algorithmInfo.getProblemDomainInfoList().stream()
-                            .filter(problemDomainInfo -> problemDomainInfo.getProblemDomain().equals(problemDomain))
-                            .map(problemDomainInfo -> problemDomainInfo.getObjectValueList())
-                            .flatMap(List::stream)
-                            .collect(Collectors.toList());
+            for (int i = 0; i < instanceInfos.size() && i < objectValues.size(); i++) {
+                MetaData.InstanceInfo info = instanceInfos.get(i);
+                Double value = objectValues.get(i);
 
-
-                    if(i<=objectValueList.size()-1){
-                        Double objectValue = objectValueList.get(i);
-                        Double instanceScore = calculateInstanceScore(instanceInfo, objectValue);
-                        instanceScoreList.add(instanceScore);
-                        System.out.println("["+algorithmInfo.getAlgorithmName() +" "+metaData.getProblemDomain()+" "+instanceInfo.getInstanceName()+"] instanceScore: "+instanceScore);
-                    }
-
-                }
-
-            // 计算问题分数
-            Double problemScore = calculateProblemScore(metaData.getInstanceInfoList(),instanceScoreList);
-            instanceScoreList.clear();
-            if (problemScore != null && !Double.isNaN(problemScore)) {
-                problemScoreList.add(problemScore);
-                System.out.println("["+algorithmInfo.getAlgorithmName() +" "+metaData.getProblemDomain()+"] problemScore: "+problemScoreList.get(problemScoreList.size()-1));
+                Double score = calculateInstanceScore(info, value);
+                instanceScores.add(score);
+                instanceScoreMap.put(info.getInstanceName(), score);
             }
-//            if(problemScore!=null){
-//                problemScoreList.add(problemScore);
-//            }
-        });
 
-        // 计算整个算法的分数
-        Double algorithmScore = calculateAlgorithmScore(problemScoreList);
-        System.out.println("["+algorithmInfo.getAlgorithmName() +"] algorithmScore: "+algorithmScore);
+            if (!instanceScores.isEmpty()) {
+                Double problemScore = calculateProblemScore(instanceInfos, instanceScores);
+                scorePerProblemMap.put(problemDomain, problemScore);
+                problemScoreList.add(problemScore);
+                scorePerInstanceMap.put(problemDomain, instanceScoreMap);
+            }
+        }
+
+        Double totalScore = calculateAlgorithmScore(problemScoreList);
+
+        return new AlgorithmScoreResult(
+                algorithmInfo.getAlgorithmName(),
+                scorePerProblemMap,
+                scorePerInstanceMap,
+                totalScore
+        );
     }
 
+    // 原始方法不变
     public static Double calculateInstanceScore(MetaData.InstanceInfo instanceInfo, Double objectValue){
         Double greedy = instanceInfo.getGreedy();
         double min = Math.min(greedy, objectValue);
-
-        return 1-(min-instanceInfo.getOptimum())/(instanceInfo.getGreedy()-instanceInfo.getOptimum());
+        return 1 - (min - instanceInfo.getOptimum()) / (greedy - instanceInfo.getOptimum());
     }
 
-    public static Double calculateProblemScore(List<MetaData.InstanceInfo> instanceInfoList,List<Double> instanceScoreList){
-        Double Numerator = 0.0;
-        Double Denominator = 0.0;
+    public static Double calculateProblemScore(List<MetaData.InstanceInfo> instanceInfoList, List<Double> instanceScoreList){
+        Double numerator = 0.0, denominator = 0.0;
         for (int i = 0; i < instanceScoreList.size(); i++) {
-            MetaData.InstanceInfo instanceInfo = instanceInfoList.get(i);
-            Double instanceScore = instanceScoreList.get(i);
-            Numerator += instanceScore*instanceInfo.getSize();
-            Denominator += instanceInfo.getSize();
+            MetaData.InstanceInfo info = instanceInfoList.get(i);
+            Double score = instanceScoreList.get(i);
+            numerator += score * info.getSize();
+            denominator += info.getSize();
         }
-        return Numerator/Denominator;
+        return denominator == 0 ? null : numerator / denominator;
     }
 
     public static Double calculateAlgorithmScore(List<Double> problemScoreList){
-        Double sum =  0.0;
-        for (Double problemScore : problemScoreList) {
-            sum += problemScore;
-        }
-        return sum/problemScoreList.size();
+        if (problemScoreList.isEmpty()) return null;
+        return problemScoreList.stream().mapToDouble(Double::doubleValue).sum() / problemScoreList.size();
+    }
+
+    // 导出所有算法评分到 JSON 文件
+    public static void exportToJson(List<AlgorithmScoreResult> allResults, String outputPath) throws IOException {
+        outputPath = outputPath+ File.separator + "results.json";
+        ObjectMapper mapper = new ObjectMapper();
+        ScoreResultContainer container = new ScoreResultContainer(allResults);
+        String json = mapper.writerWithDefaultPrettyPrinter().writeValueAsString(container);
+//        System.out.println(json);
+        mapper.writeValue(new File(outputPath), container);
+        ConsolePrintUtils.print("SUCCESS:results.json生成成功","输出路径"+outputPath);
     }
 }
